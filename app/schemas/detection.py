@@ -4,22 +4,6 @@ from pydantic import BaseModel
 from typing import Optional
 
 
-class YoutubeUrlRequest(BaseModel):
-    youtubeUrl: str
-
-
-class YoutubeVideoInfoResponse(BaseModel):
-    videoId: str
-    title: str
-    duration: int
-    thumbnailUrl: str
-
-
-class TimeSegmentRequest(BaseModel):
-    startTime: int
-    endTime: int
-
-
 class DetectionRunResponse(BaseModel):
     detectionId: str
     message: str
@@ -34,7 +18,5 @@ class DetectionResultData(BaseModel):
 
 class DetectionResultResponse(BaseModel):
     detectionId: str
-    videoId: str
-    startTime: int
-    endTime: int
+    timestamp: str 
     result: DetectionResultData
