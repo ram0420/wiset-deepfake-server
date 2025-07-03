@@ -29,9 +29,10 @@ class FindUsernameRequest(BaseModel):
 class FindUsernameResponse(BaseModel):
     username: str
 
-class PasswordResetRequest(BaseModel):
-    username: str
+class PasswordFindRequest(BaseModel):
+    loginId: str
+    phone: str
     email: EmailStr
 
-class PasswordResetResponse(BaseModel):
-    message: str
+class PasswordFindResponse(BaseModel):
+    id: str
