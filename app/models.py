@@ -1,7 +1,7 @@
  # SQLAlchemy or Tortoise ORM 모델 정의 (User, DetectionJob, Quiz 등)
 from sqlalchemy import Column, String, Integer, Boolean, ForeignKey, Text
 from sqlalchemy.orm import relationship
-from app.extensions import Base
+from app.database import Base
 
 class User(Base):
     __tablename__ = "users"
