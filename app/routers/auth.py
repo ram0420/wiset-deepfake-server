@@ -8,7 +8,6 @@ from app.schemas.auth import (
     RegisterRequest, RegisterResponse,
     LoginRequest, LoginResponse,
     FindUsernameRequest, FindUsernameResponse,
-    PasswordResetRequest, PasswordResetResponse,
     PasswordFindRequest, PasswordFindResponse
 )
 from app.dependencies import get_db
