@@ -1,8 +1,8 @@
-# /users/me 라우터 (프로필)
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from app.dependencies import get_db, get_current_user
-from app.models import User, UserProfile, QuizScore, School
+from app.models import User, UserProfile, School
 from app.schemas.user import MyInfoResponse, UpdateMyInfoRequest, UpdateResponse, RankInfo, ClassRankingResponse
 from app.services.auth_service import get_password_hash
 

@@ -1,7 +1,7 @@
 # 프로필 조회·수정
 
 from sqlalchemy.orm import Session, joinedload
-from app.models import User, UserProfile, School, QuizScore
+from app.models import User, UserProfile, School
 
 def get_user_profile(db: Session, user_id: str):
     return db.query(UserProfile).options(joinedload(UserProfile.school)).filter_by(user_id=user_id).first()
