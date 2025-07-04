@@ -3,36 +3,47 @@
 
 from pydantic import BaseModel, EmailStr, Field
 
-class LoginRequest(BaseModel):
-    username: str = Field(..., description="사용자 아이디")
-    password: str = Field(..., description="비밀번호")
-
-class LoginResponse(BaseModel):
-    token: str
-    userId: str
-
+## 회원가입 ##
 class RegisterRequest(BaseModel):
     username: str
+    gender: str
+    schoolCode: str
+    loginId: str
     password: str
+    passwordConfirm: str
     email: EmailStr
-    school: str
-    grade: int
-    classNumber: int
+    phone: str
+    email: str
 
 class RegisterResponse(BaseModel):
-    userId: str
+    loginId: str
     message: str
 
+## 아이디 찾기 ##
 class FindUsernameRequest(BaseModel):
+    Name: str
+    gender: str
+    schoolCode: str
+    phone: str 
     email: EmailStr
 
 class FindUsernameResponse(BaseModel):
-    username: str
+    loginId: str
 
+## 비밀번호 찾기 ##
 class PasswordFindRequest(BaseModel):
     loginId: str
     phone: str
     email: EmailStr
 
 class PasswordFindResponse(BaseModel):
-    id: str
+    password: str
+
+## 로그인 ##
+class LoginRequest(BaseModel):
+    loginId: str = Field(..., description="사용자 아이디")
+    password: str = Field(..., description="비밀번호")
+
+class LoginResponse(BaseModel):
+    token: str
+    loginId: str

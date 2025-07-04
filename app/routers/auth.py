@@ -1,6 +1,3 @@
-# API 라우터 모듈
-# /api/v1/auth 라우터 (signup, login, find-id, find-pw)
-
 # auth.py
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
