@@ -1,4 +1,4 @@
-# /api/v1/quiz 라우터 (random, answer)
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from uuid import uuid4

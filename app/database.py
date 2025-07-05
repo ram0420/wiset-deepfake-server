@@ -1,25 +1,26 @@
-from dotenv import load_dotenv
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from fastapi_jwt_auth import AuthJWT
-from pydantic import BaseSettings
+from dotenv import load_dotenv
+import os
 
 load_dotenv()
-print("DATABASE_URL:", os.getenv("DATABASE_URL"))
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+print("DATABASE_URL:", DATABASE_URL)
+
+# engine = create_engine(
+#     DATABASE_URL,
+#     connect_args={"sslmode": "require"}  # ✅ Supabase PostgreSQL은 SSL 필요
+# )
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+    connect_args={
+        "sslmode": "require"
+    } if DATABASE_URL.startswith("postgresql") else {
+        "check_same_thread": False
+    }
 )
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
-class Settings(BaseSettings):
-    authjwt_secret_key: str = os.getenv("AUTHJWT_SECRET_KEY", "your-secret-key")
-
-@AuthJWT.load_config
-def get_config():
-    return Settings()

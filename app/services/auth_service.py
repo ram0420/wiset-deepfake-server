@@ -5,7 +5,7 @@
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from app.models import User
-from app.utils.jwt_helper import create_access_token
+from app.utils.auth import create_access_token
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

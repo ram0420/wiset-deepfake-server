@@ -1,8 +1,6 @@
 # 랜덤 퀴즈 생성 및 채점
 
 from sqlalchemy.orm import Session
-from app.models import QuizScore
-from sqlalchemy.orm import Session
 from app.models import QuizSession, QuizQuestion, QuizAnswer
 from uuid import uuid4
 

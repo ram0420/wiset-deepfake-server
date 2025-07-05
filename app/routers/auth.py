@@ -1,4 +1,5 @@
-# auth.py
+# app/routers/auth.py
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.schemas.auth import (
@@ -9,6 +10,7 @@ from app.schemas.auth import (
 )
 from app.dependencies import get_db
 from app.services import auth_service
+from app.utils.auth import create_access_token  # ✅ 수정된 부분
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -35,8 +37,9 @@ def signup(data: RegisterRequest, db: Session = Depends(get_db)):
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = auth_service.authenticate_user(db, data.loginId, data.password)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    token = auth_service.create_login_token(user)
+        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다")
+
+    token = create_access_token({"sub": str(user.id)})  # ✅ JWT 발급 방식 수정
     return {"token": token, "userId": str(user.id)}
 
 @router.post("/findId", response_model=FindUsernameResponse)
@@ -60,13 +63,5 @@ def find_pw(data: PasswordFindRequest, db: Session = Depends(get_db)):
     )
     if not user:
         raise HTTPException(status_code=404, detail="일치하는 사용자를 찾을 수 없습니다.")
-    return {"id": user.password_hash}  # 보안상 실제 사용 시 제거 필요
-
-# @router.post("/resetPw", response_model=PasswordResetResponse)
-# def reset_pw(data: PasswordResetRequest, db: Session = Depends(get_db)):
-#     user = auth_service.verify_user_for_pw_reset(
-#         db, login_id=data.loginId, email=data.email
-#     )
-#     if not user:
-#         raise HTTPException(status_code=404, detail="User not found or email mismatch")
-#     return {"message": "비밀번호 재설정 링크를 이메일로 전송하였습니다."}
+    # 실제 서비스에서는 해시값 반환하면 안 됩니다!
+    return {"id": user.login_id}  # 또는 임시 비밀번호 발급 로직

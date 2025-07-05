@@ -9,7 +9,6 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     password_hash = Column(String)
     phone = Column(String)
-
     profile = relationship("UserProfile", back_populates="user")
 
 
