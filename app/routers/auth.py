@@ -33,7 +33,7 @@ def signup(data: RegisterRequest, db: Session = Depends(get_db)):
             login_id=data.loginId  # 로그인용 ID
         )
         return {
-            "loginId": user.loginId,  # 수정: 정확한 필드명(loginId) 반환
+            "loginId": user.login_id,  # 수정: 정확한 필드명(loginId) 반환
             "message": "회원가입 성공"
         }
     except ValueError as e:
@@ -41,20 +41,18 @@ def signup(data: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/check-user-id")
-def check_user_id(user_id: str, db: Session = Depends(get_db)):
-    # User 모델의 로그인 ID 필드는 loginId 입니다.
-    exists = db.query(User).filter(User.loginId == user_id).first()
+def check_user_id(loginId: str, db: Session = Depends(get_db)):
+    exists = db.query(User).filter(User.login_id == loginId).first()
     return {
         "isDuplicate": bool(exists),
         "message": "이미 사용 중인 아이디입니다." if exists else "사용 가능한 아이디입니다."
     }
 
-
 @router.post("/login", response_model=LoginResponse)
 def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = auth_service.authenticate_user(
         db,
-        login_id=data.loginId,  # 로그인용 ID 사용 (User.loginId)
+        login_id=data.loginId,  # 로그인용 ID 사용 (User.login_id)
         password=data.password
     )
     if not user:
@@ -66,5 +64,5 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     token = create_access_token({"sub": str(user.id)})
     return {
         "token": token,
-        "loginId": user.loginId  # 수정: 정확한 필드명(loginId) 반환
+        "loginId": user.login_id  # 수정: 정확한 필드명(loginId) 반환
     }

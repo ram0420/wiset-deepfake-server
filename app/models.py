@@ -6,11 +6,10 @@ from app.database import Base
 class User(Base):
     __tablename__ = "users"
     id = Column(String, primary_key=True, index=True)  # 내부 식별자
-    loginId = Column(String, unique=True, index=True)  # 로그인 ID
+    login_id = Column(String, unique=True, index=True)  # 변수명과 컬럼명 일치
     password_hash = Column(String)  # 비밀번호 해시
-    email = Column(String, unique=True, index=True)  # 이메일
+    email = Column(String, index=True)  # 이메일
     username = Column(String)  # 사용자 이름
-    schoolCode = Column(String)  # 학교 코드 (예: "한국중0101")
     phone = Column(String)  # 전화번호
 
     profile = relationship("UserProfile", back_populates="user", uselist=False )  # 1:1 연결된 프로필
@@ -24,36 +23,25 @@ class UserProfile(Base):
     gender = Column(String)
     score = Column(Integer, default=0)
 
-    # ✅ 이 사용자가 속한 반 (학교+학년+반 조합)
-    class_group_id = Column(Integer, ForeignKey("class_groups.id"))
-    class_group = relationship("ClassGroup", back_populates="users")
+    school_id = Column(Integer, ForeignKey("schools.id"))  # ✅ FK 연결
+    grade = Column(Integer)
+    class_num = Column(Integer)
+
 
     # ✅ 사용자 계정 정보 (User 테이블 연결)
     user = relationship("User", back_populates="profile")
+    school = relationship("School", back_populates="students") #역참조
 
 
 class School(Base):
     __tablename__ = "schools"
     id = Column(Integer, primary_key=True)
     code = Column(String, unique=True)  # 예: "한국중0101"
-    name = Column(String)               # 예: "한국중학교"
+    name = Column(String)               # 예: "한국중"
 
-    # ✅ 하나의 학교는 여러 학급(class_group)을 가짐
-    class_groups = relationship("ClassGroup", back_populates="school")
+    students = relationship("UserProfile", back_populates="school")  # ✅ 역참조
 
-
-class ClassGroup(Base):
-    __tablename__ = "class_groups"
-    id = Column(Integer, primary_key=True)
-    school_id = Column(Integer, ForeignKey("schools.id"))
-    grade = Column(Integer)     # 예: 1학년
-    class_num = Column(Integer) # 예: 3반
-
-    # ✅ 이 학급이 속한 학교
-    school = relationship("School", back_populates="class_groups")
-
-    # ✅ 하나의 반에는 여러 명의 학생(UserProfile)이 소속됨
-    users = relationship("UserProfile", back_populates="class_group")
+##########################################################################################3
 
 
 class DetectionSession(Base):
@@ -73,6 +61,7 @@ class DetectionResult(Base):
     timestamp = Column(Float)   # ← 새로 추가
     details = Column(Text)
 
+##########################################################################################3
 
 class QuizSession(Base):
     __tablename__ = "quiz_sessions"
