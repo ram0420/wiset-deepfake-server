@@ -18,5 +18,5 @@ class DetectionResultData(BaseModel):
 
 class DetectionResultResponse(BaseModel):
     detectionId: str
-    timestamp: str 
+    timestamp: Optional[float]
     result: DetectionResultData

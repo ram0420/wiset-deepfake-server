@@ -13,7 +13,6 @@ class RegisterRequest(BaseModel):
     passwordConfirm: str
     email: EmailStr
     phone: str
-    email: str
 
 class RegisterResponse(BaseModel):
     loginId: str

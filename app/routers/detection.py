@@ -48,6 +48,7 @@ async def run_detection(
         detection_id=session.id,
         is_deepfake=is_fake,
         confidence=prob,
+        timestamp=timestamp,
         details=f"{timestamp}초 프레임 기반 탐지 결과"
     )
     db.add(result)
@@ -75,7 +76,7 @@ def get_detection_result(detectionId: str, db: Session = Depends(get_db), user =
     # timestamp는 details에서 추출하거나 DB에 별도 컬럼으로 두면 좋음
     return DetectionResultResponse(
         detectionId=session.id,
-        timestamp="추후 분리 저장 권장",  # 예: "13.0"
+        timestamp=result.timestamp,  # DB에 저장된 float 값 사용
         result=DetectionResultData(
             isDeepfake=result.is_deepfake,
             confidence=result.confidence,

@@ -1,34 +1,97 @@
- # 비즈니스 로직 레이어
 
-# 회원가입·로그인·ID/PW 찾기 구현
-
+import uuid
 from sqlalchemy.orm import Session
+from fastapi import HTTPException
 from passlib.context import CryptContext
-from app.models import User
+from app.models import User, UserProfile, School
 from app.utils.auth import create_access_token
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
+
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
+
 def authenticate_user(db: Session, login_id: str, password: str):
-    user = db.query(User).filter(User.email == login_id).first()
+    user = db.query(User).filter(User.loginId == login_id).first()  # ✅ 수정됨
     if not user or not verify_password(password, user.password_hash):
         return None
     return user
 
-def register_user(db: Session, user_data):
-    # user_data: dict or schema object
-    hashed_pw = get_password_hash(user_data.password)
-    user = User(email=user_data.loginId, password_hash=hashed_pw, phone=user_data.phone)
+
+def register_user(
+    db: Session,
+    username: str,
+    password: str,
+    email: str,
+    school_code: str,
+    gender: str,
+    phone: str,
+    login_id: str
+):
+    # 1. 중복 ID 확인
+    if db.query(User).filter(User.loginId == login_id).first():
+        raise ValueError("이미 사용 중인 아이디입니다.")
+
+    user_id = str(uuid.uuid4())
+    hashed_pw = get_password_hash(password)
+
+    # 2. User 생성
+    user = User(
+        id=user_id,
+        loginId=login_id,
+        password_hash=hashed_pw,
+        email=email,
+        username=username,
+        schoolCode=school_code,
+        phone=phone
+    )
     db.add(user)
+    db.flush()  # user.id 확보용
+
+    # 3. School 확인
+    school = db.query(School).filter(School.code == school_code).first()
+    if not school:
+        raise ValueError("유효하지 않은 학교 코드입니다.")
+
+    # 4. 학년 / 반 정보 파싱
+    try:
+        grade = int(school_code[-4:-2])
+        class_num = int(school_code[-2:])
+    except ValueError:
+        raise ValueError("학교 코드에서 학년/반 정보를 추출할 수 없습니다.")
+
+    # 5. ClassGroup 찾기 또는 생성
+    class_group = db.query(ClassGroup).filter_by(
+        school_id=school.id,
+        grade=grade,
+        class_num=class_num
+    ).first()
+
+    if not class_group:
+        class_group = ClassGroup(
+            school_id=school.id,
+            grade=grade,
+            class_num=class_num
+        )
+        db.add(class_group)
+        db.flush()
+
+    # 6. UserProfile 생성
+    profile = UserProfile(
+        user_id=user.id,
+        gender=gender,
+        class_group_id=class_group.id,
+        score=0
+    )
+    db.add(profile)
+
     db.commit()
     db.refresh(user)
-    return user
 
-def create_token(user: User):
-    return create_access_token({"sub": str(user.id), "email": user.email})
+    return user
