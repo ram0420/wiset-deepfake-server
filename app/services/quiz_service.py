@@ -13,6 +13,7 @@ def serialize_question(question: QuizQuestion):
         "id": question.id,
         "question": question.question,
         "options": question.options,  # 프론트에서 JSON으로 decode
+        "correct_answer": question.correct_answer,
         "image_url": question.image_url,
         "explanation": question.explanation  # ✅ 추가 
     }

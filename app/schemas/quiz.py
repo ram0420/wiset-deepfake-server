@@ -7,6 +7,7 @@ class QuizQuestionResponse(BaseModel):
     id: int
     question: str
     options: str  # 프론트에서 JSON.parse()로 디코딩
+    correct_answer: str
     image_url: Optional[str] = None
     explanation: Optional[str] = None  # ✅ 추가
 
