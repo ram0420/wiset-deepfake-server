@@ -8,10 +8,6 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 print("DATABASE_URL:", DATABASE_URL)
 
-# engine = create_engine(
-#     DATABASE_URL,
-#     connect_args={"sslmode": "require"}  # ✅ Supabase PostgreSQL은 SSL 필요
-# )
 engine = create_engine(
     DATABASE_URL,
     connect_args={

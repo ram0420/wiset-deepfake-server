@@ -10,7 +10,7 @@ from typing import Optional, List
 class MyInfoResponse(BaseModel):
     userId: str         # UUID
     loginId: str        # 로그인용 ID (이메일 기반)
-    name: str           # 사용자 실명
+    username: str           # 사용자 실명
     gender: str
     schoolCode: str
     phone: str
@@ -19,7 +19,7 @@ class MyInfoResponse(BaseModel):
 
 # 2. 사용자 정보 수정 요청
 class UpdateMyInfoRequest(BaseModel):
-    name: Optional[str] = None
+    username: Optional[str] = None
     gender: Optional[str] = None
     loginId: Optional[str] = None
     password: Optional[str] = None

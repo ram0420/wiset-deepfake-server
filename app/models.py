@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, ForeignKey, Boolean, DateTime, Text
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 from app.database import Base
 
 
@@ -13,7 +14,7 @@ class User(Base):
     phone = Column(String)  # 전화번호
 
     profile = relationship("UserProfile", back_populates="user", uselist=False )  # 1:1 연결된 프로필
-
+    quiz_sessions = relationship("QuizSession", back_populates="user")
 
 class UserProfile(Base):
     __tablename__ = "user_profiles"
@@ -48,43 +49,61 @@ class DetectionSession(Base):
     __tablename__ = "detection_sessions"
     id = Column(String, primary_key=True)
     user_id = Column(String, ForeignKey("users.id"))
-    img_id = Column(String)
     status = Column(String)
+
     
 
 class DetectionResult(Base):
     __tablename__ = "detection_results"
     id = Column(Integer, primary_key=True)
     detection_id = Column(String, ForeignKey("detection_sessions.id"))
-    is_deepfake = Column(Boolean)
-    confidence = Column(Float)  # ← float로 변경
-    timestamp = Column(Float)   # ← 새로 추가
-    details = Column(Text)
+    is_deepfake = Column(Boolean, nullable=False)
+    confidence = Column(Float, nullable=False)
+    details = Column(Text, nullable=True)  # ← "abc.png, abc_gradcam.png" 등
+
 
 ##########################################################################################3
 
-class QuizSession(Base):
-    __tablename__ = "quiz_sessions"
-    id = Column(String, primary_key=True)
-    user_id = Column(String, ForeignKey("users.id"))
-
-
 class QuizQuestion(Base):
     __tablename__ = "quiz_questions"
-    id = Column(Integer, primary_key=True)
-    quiz_id = Column(String, ForeignKey("quiz_sessions.id"))
-    question_number = Column(Integer)
-    question = Column(String)
-    options = Column(String)  # JSON 문자열로 저장
-    correct_answer = Column(String)
-    explanation = Column(String)
+
+    id = Column(Integer, primary_key=True, index=True)
+    question = Column(String, nullable=False)
+    options = Column(Text, nullable=False)  # JSON 문자열
+    correct_answer = Column(String, nullable=False)
+    image_url = Column(Text, nullable=True)
+    explanation = Column(Text, nullable=True)
+
+
+class QuizSession(Base):
+    __tablename__ = "quiz_sessions"
+
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    score = Column(Integer, nullable=True)  # 오늘 맞춘 점수 (0~100)
+
+    user = relationship("User", back_populates="quiz_sessions")
+    answers = relationship("QuizAnswer", back_populates="session", cascade="all, delete-orphan")
 
 
 class QuizAnswer(Base):
     __tablename__ = "quiz_answers"
-    id = Column(Integer, primary_key=True)
-    quiz_id = Column(String)
-    user_id = Column(String)
-    question_number = Column(Integer)
-    selected_answer = Column(String)
-    correct = Column(Boolean)
+
+    id = Column(Integer, primary_key=True, index=True)
+    quiz_id = Column(String, ForeignKey("quiz_sessions.id"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    question_id = Column(Integer, ForeignKey("quiz_questions.id"), nullable=False)
+    selected_answer = Column(Text, nullable=False)
+    correct = Column(Boolean, nullable=False)
+
+    session = relationship("QuizSession", back_populates="answers")
+    question = relationship("QuizQuestion")
+
+##########################################################################################3
+
+class RecommendedVideo(Base):
+    __tablename__ = "recommended_videos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    youtube_url = Column(String, nullable=False)

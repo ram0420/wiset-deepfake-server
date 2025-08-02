@@ -18,14 +18,16 @@ def get_my_info(user: User = Depends(get_current_user), db: Session = Depends(ge
     if not profile:
         raise HTTPException(status_code=404, detail="프로필 정보를 찾을 수 없습니다.")
 
-    school_code = ""
-    if profile.school:
-        school_code = f"{profile.school.name}{profile.grade:02d}{profile.class_num:02d}"
+    # school_code = ""
+    # if profile.school:
+    #     school_code = f"{profile.school.name}{profile.grade:02d}{profile.class_num:02d}"
+
+    school_code = profile.school.code if profile.school else ""
 
     return MyInfoResponse(
         userId=str(user.id),
-        loginId=user.email,
-        name=profile.nickname,
+        loginId=user.login_id,
+        username=user.username,
         gender=profile.gender,
         schoolCode=school_code,
         phone=user.phone,
@@ -38,14 +40,25 @@ def update_my_info(data: UpdateMyInfoRequest, user: User = Depends(get_current_u
     if data.password and data.password != data.passwordConfirm:
         raise HTTPException(status_code=422, detail="비밀번호와 비밀번호 확인이 일치하지 않습니다")
 
-    if data.loginId and data.loginId != user.email:
-        if db.query(User).filter(User.email == data.loginId).first():
-            raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
-        user.email = data.loginId
+    # if data.loginId and data.loginId != user.login_id:
+    #     if db.query(User).filter(User.login_id == data.loginId).first():
+    #         raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
+    #     user.login_id = data.loginId
 
-    if data.email and data.email != user.email:
-        if db.query(User).filter(User.email == data.email).first():
-            raise HTTPException(status_code=409, detail="이미 사용 중인 이메일입니다")
+    if data.loginId:
+        if data.loginId != user.login_id:
+            if db.query(User).filter(User.login_id == data.loginId, User.id != user.id).first():
+                raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다")
+            print(f"[DEBUG] loginId 변경: {user.login_id} → {data.loginId}")
+            user.login_id = data.loginId
+        else:
+            print("[DEBUG] loginId는 기존과 동일함, 변경 없음")
+    else:
+        print("[DEBUG] loginId가 전달되지 않음")
+
+
+
+    if data.email:
         user.email = data.email
 
     if data.password:
@@ -58,8 +71,8 @@ def update_my_info(data: UpdateMyInfoRequest, user: User = Depends(get_current_u
     if not profile:
         raise HTTPException(status_code=404, detail="프로필 정보가 없습니다.")
 
-    if data.name:
-        profile.nickname = data.name
+    if data.username:
+        user.username = data.username
     if data.gender:
         profile.gender = data.gender
 
@@ -73,11 +86,19 @@ def get_class_ranking(user: User = Depends(get_current_user), db: Session = Depe
     if not profile:
         raise HTTPException(status_code=500, detail="프로필 정보를 찾을 수 없습니다.")
 
-    same_class_profiles = db.query(UserProfile).filter(
-        UserProfile.school_id == profile.school_id,
-        UserProfile.grade == profile.grade,
-        UserProfile.class_num == profile.class_num
-    ).all()
+    # same_class_profiles = db.query(UserProfile).filter(
+    #     UserProfile.school_id == profile.school_id,
+    #     UserProfile.grade == profile.grade,
+    #     UserProfile.class_num == profile.class_num
+    # ).all()
+
+    same_class_profiles = db.query(UserProfile)\
+        .options(joinedload(UserProfile.user))\
+        .filter(
+            UserProfile.school_id == profile.school_id,
+            UserProfile.grade == profile.grade,
+            UserProfile.class_num == profile.class_num
+        ).all()
 
     sorted_profiles = sorted(
         same_class_profiles,
@@ -91,7 +112,7 @@ def get_class_ranking(user: User = Depends(get_current_user), db: Session = Depe
     for idx, p in enumerate(sorted_profiles, start=1):
         entry = RankInfo(
             userId=str(p.user_id),
-            username=p.nickname,
+            username=p.user.username,
             score=p.score or 0,
             rank=idx
         )

@@ -1,36 +1,40 @@
-# Quiz 요청·응답 스키마
-
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 
-class QuizCreateResponse(BaseModel):
-    quizId: str
-    message: str
-
-
+# ✅ 퀴즈 문제 1개
 class QuizQuestionResponse(BaseModel):
-    quizId: str
-    questionNumber: int
+    id: int
     question: str
-    options: List[str]
+    options: str  # 프론트에서 JSON.parse()로 디코딩
+    image_url: Optional[str] = None
+    explanation: Optional[str] = None  # ✅ 추가
+
+    class Config:
+        orm_mode = True
 
 
+# ✅ 퀴즈 시작 응답
+class QuizCreateResponse(BaseModel):
+    session_id: str
+    questions: List[QuizQuestionResponse]
+
+
+# ✅ 사용자가 정답 제출 시 요청
 class QuizAnswerRequest(BaseModel):
-    questionNumber: int
-    answer: str
+    session_id: str
+    question_id: int
+    selected_answer: str
 
 
+# ✅ 정답 제출 응답
 class QuizAnswerResponse(BaseModel):
     correct: bool
-    explanation: str
-    score: int
-    message: str
 
 
+# ✅ 퀴즈 결과 응답
 class QuizResultResponse(BaseModel):
-    quizId: str
-    username: str
-    totalQuestions: int
-    correctAnswers: int
-    message: str
+    total: int
+    correct: int
+    score: int
+    score_string: str

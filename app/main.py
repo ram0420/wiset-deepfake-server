@@ -4,10 +4,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine, Base
 from app.routers import auth, main, user, detection, quiz
+from fastapi.staticfiles import StaticFiles 
+from app.routers import recommend 
 
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Deepfake Detection & Quiz Service")
+
+# Static 파일 mount (꼭 있어야 함!)
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/")
 def read_root():
@@ -28,3 +33,4 @@ app.include_router(main.router)
 app.include_router(user.router)
 app.include_router(detection.router)
 app.include_router(quiz.router)
+app.include_router(recommend.router)

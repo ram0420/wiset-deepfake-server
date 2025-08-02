@@ -1,54 +1,96 @@
-# 랜덤 퀴즈 생성 및 채점
-
+import uuid
+from datetime import date
 from sqlalchemy.orm import Session
-from app.models import QuizSession, QuizQuestion, QuizAnswer
-from uuid import uuid4
+from sqlalchemy import func
+from fastapi import HTTPException
 
-def create_quiz_session(db: Session, user_id: str) -> str:
-    quiz_id = str(uuid4())
-    db.add(QuizSession(id=quiz_id, user_id=user_id))
+from app.models import QuizSession, QuizQuestion, QuizAnswer, UserProfile
 
-    for i in range(10):
-        question = QuizQuestion(
-            quiz_id=quiz_id,
-            question_number=i + 1,
-            question=f"문제 {i + 1}",
-            options=["A", "B", "C", "D"],
-            correct_answer="A",
-            explanation="정답은 A입니다."
-        )
-        db.add(question)
 
+# 🔸 문제 시리얼라이즈 (프론트 전달용)
+def serialize_question(question: QuizQuestion):
+    return {
+        "id": question.id,
+        "question": question.question,
+        "options": question.options,  # 프론트에서 JSON으로 decode
+        "image_url": question.image_url,
+        "explanation": question.explanation  # ✅ 추가 
+    }
+
+def start_quiz(user_id: str, db: Session):
+    # 새로운 세션 생성
+    session = QuizSession(id=str(uuid.uuid4()), user_id=user_id)
+    db.add(session)
     db.commit()
-    return quiz_id
 
-def get_next_question(db: Session, quiz_id: str, user_id: str):
-    answered = db.query(QuizAnswer.question_number).filter_by(quiz_id=quiz_id, user_id=user_id).all()
-    answered_set = {q[0] for q in answered}
-    return db.query(QuizQuestion).filter(
-        QuizQuestion.quiz_id == quiz_id,
-        ~QuizQuestion.question_number.in_(answered_set)
-    ).order_by(QuizQuestion.question_number).first()
+    # 랜덤 10문제 제공
+    questions = db.query(QuizQuestion).order_by(func.random()).limit(10).all()
 
-def submit_answer(db: Session, quiz_id: str, user_id: str, question_number: int, selected: str):
-    question = db.query(QuizQuestion).filter_by(quiz_id=quiz_id, question_number=question_number).first()
+    return {
+        "session_id": session.id,
+        "questions": [serialize_question(q) for q in questions]
+    }
+
+
+# ✅ 2. 문제 하나 정답 제출
+def submit_answer(session_id: str, question_id: int, selected_answer: str, user_id: str, db: Session):
+    question = db.query(QuizQuestion).filter_by(id=question_id).first()
     if not question:
-        return None, 0
+        raise HTTPException(status_code=404, detail="문제가 존재하지 않습니다.")
 
-    correct = question.correct_answer == selected
-    db.add(QuizAnswer(
-        quiz_id=quiz_id,
+    is_correct = (selected_answer == question.correct_answer)
+
+    answer = QuizAnswer(
+        quiz_id=session_id,
         user_id=user_id,
-        question_number=question_number,
-        selected_answer=selected,
-        correct=correct
-    ))
+        question_id=question_id,
+        selected_answer=selected_answer,
+        correct=is_correct
+    )
+    db.add(answer)
     db.commit()
 
-    score = db.query(QuizAnswer).filter_by(quiz_id=quiz_id, user_id=user_id, correct=True).count() * 10
-    return correct, score, question.explanation
+    return {"correct": is_correct}
 
-def get_quiz_result(db: Session, quiz_id: str, user_id: str):
-    total = db.query(QuizQuestion).filter_by(quiz_id=quiz_id).count()
-    correct = db.query(QuizAnswer).filter_by(quiz_id=quiz_id, user_id=user_id, correct=True).count()
-    return total, correct
+
+# ✅ 3. 결과 반환 + 점수 저장 + user_profiles.score에 누적 반영
+def get_result(session_id: str, db: Session):
+    # 1. 세션 조회
+    session = db.query(QuizSession).filter_by(id=session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없습니다.")
+
+    # 💬 이미 채점된 세션이면 중복 반영 방지 (score가 이미 저장되어 있음)
+    if session.score is not None:
+        return {
+            "total": db.query(QuizAnswer).filter_by(quiz_id=session_id).count(),
+            "correct": session.score // 10,
+            "score": session.score,
+            "score_string": f"{session.score // 10}/10"
+        }
+
+    # 2. 정답 수 계산
+    answers = db.query(QuizAnswer).filter_by(quiz_id=session_id).all()
+    total = len(answers)
+    correct = sum(1 for a in answers if a.correct)
+    score = correct * 10
+
+    # 3. 세션에 점수 저장
+    session.score = score
+
+    # 4. 유저 프로필 누적 점수 저장 (None 방어 포함)
+    profile = db.query(UserProfile).filter_by(user_id=session.user_id).first()
+    if profile:
+        if profile.score is None:  # 💬 None이면 0으로 초기화
+            profile.score = 0
+        profile.score += score
+
+    db.commit()
+
+    return {
+        "total": total,
+        "correct": correct,
+        "score": score,
+        "score_string": f"{correct}/{total}"
+    }
+
