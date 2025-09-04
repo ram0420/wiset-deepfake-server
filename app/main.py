@@ -6,6 +6,7 @@ from app.database import engine, Base
 from app.routers import auth, main, user, detection, quiz
 from fastapi.staticfiles import StaticFiles 
 from app.routers import recommend 
+import os
 
 Base.metadata.create_all(bind=engine)
 
