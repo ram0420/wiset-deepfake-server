@@ -11,8 +11,10 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Deepfake Detection & Quiz Service")
 
-# Static 파일 mount (꼭 있어야 함!)
+# ✅ 없으면 만들어서 마운트 에러 방지 (빈 디렉터리여도 OK)
+os.makedirs("app/static/uploads", exist_ok=True)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
 
 @app.get("/")
 def read_root():
