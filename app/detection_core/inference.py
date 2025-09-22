@@ -100,76 +100,171 @@ from .freqnet import freqnet
 
 # =====================
 # 전역 싱글톤 모델 로딩
+# =====================# app/detection_core/inference.py
+
+import io
+import threading
+from typing import Tuple, List, Optional
+
+import numpy as np
+import torch
+from PIL import Image, ImageOps
+
+from .freqnet import freqnet
+
+
 # =====================
-_MODEL = None
-_DEVICE = None
+# 전역 싱글톤 모델 로딩
+#  - model_path/디바이스가 바뀌면 자동 재로딩
+#  - 파라미터는 requires_grad=False로 고정(추론 전용)
+# =====================
+_MODEL: Optional[torch.nn.Module] = None
+_DEVICE: Optional[torch.device] = None
+_MODEL_PATH: Optional[str] = None
 _LOCK = threading.Lock()
 
-def _load_model(model_path: str, device: torch.device):
+
+def _safe_extract_state(ckpt):
+    """다양한 체크포인트 포맷을 안전하게 처리."""
+    if isinstance(ckpt, dict):
+        for key in ("model", "state_dict", "weights"):
+            if key in ckpt and isinstance(ckpt[key], (dict, torch.nn.Module)):
+                return ckpt[key]
+    return ckpt
+
+
+def _load_model(model_path: str, device: torch.device) -> torch.nn.Module:
     model = freqnet(num_classes=1)
-    ckpt = torch.load(model_path, map_location=device)
-    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
+
+    # PyTorch 2.x면 weights_only=True로 불필요한 객체 역직렬화 방지
+    try:
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=True)  # type: ignore[arg-type]
+    except TypeError:
+        ckpt = torch.load(model_path, map_location="cpu")
+
+    state = _safe_extract_state(ckpt)
     model.load_state_dict(state, strict=False)
-    model.to(device)
-    model.eval()
+
+    # 추론 전용 설정
+    for p in model.parameters():
+        p.requires_grad_(False)
+
+    model.to(device).eval()
+    torch.set_grad_enabled(False)
     return model
 
-def get_model(model_path: str, cuda: bool = True):
-    global _MODEL, _DEVICE
+
+def get_model(model_path: str, cuda: bool = True) -> Tuple[torch.nn.Module, torch.device]:
+    """
+    싱글톤 모델과 디바이스 반환.
+    - model_path 또는 디바이스가 바뀌면 재로딩
+    """
+    global _MODEL, _DEVICE, _MODEL_PATH
     want_device = torch.device("cuda" if cuda and torch.cuda.is_available() else "cpu")
+
     with _LOCK:
-        if _MODEL is None or _DEVICE != want_device:
+        if _MODEL is None or _DEVICE != want_device or _MODEL_PATH != model_path:
             _MODEL = _load_model(model_path, want_device)
             _DEVICE = want_device
-    return _MODEL, _DEVICE
+            _MODEL_PATH = model_path
+    return _MODEL, _DEVICE  # type: ignore[return-value]
+
 
 # =====================
-# 전처리
+# 전처리 (PIL+NumPy) — torchvision 미사용
 # =====================
-def _preprocess_pil(img_pil: Image.Image, no_resize=False, no_crop=True) -> torch.Tensor:
-    ops = []
-    if not no_resize:
-        ops.append(transforms.Resize((256, 256)))
-    if not no_crop:
-        ops.append(transforms.CenterCrop(224))
-    ops.extend([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225])
-    ])
-    return transforms.Compose(ops)(img_pil.convert("RGB"))
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def _preprocess_pil(img_pil: Image.Image,
+                    no_resize: bool = False,
+                    no_crop: bool = True,
+                    resize_to: int = 256,
+                    crop_to: int = 224) -> torch.Tensor:
+    """
+    PIL.Image -> torch.FloatTensor [C,H,W], ImageNet 정규화.
+    - 기본: 256 리사이즈 후 224 중앙 크롭(관례)
+    - 경량화를 위해 필요 시 no_resize/no_crop 설정 가능
+    """
+    img = img_pil.convert("RGB")
+    if not no_resize and resize_to:
+        img = img.resize((resize_to, resize_to), Image.BILINEAR)
+    if not no_crop and crop_to and (img.size[0] != crop_to or img.size[1] != crop_to):
+        img = ImageOps.fit(img, (crop_to, crop_to), method=Image.BILINEAR, centering=(0.5, 0.5))
+
+    arr = np.asarray(img, dtype=np.float32) / 255.0          # [H,W,3] in 0..1
+    arr = (arr - _IMAGENET_MEAN) / _IMAGENET_STD             # 정규화
+    t = torch.from_numpy(arr).permute(2, 0, 1)               # [3,H,W]
+    return t
+
 
 # =====================
-# 기존 API(경로 입력) - 유지(호환)
+# 기존 API(경로 입력) - 호환 유지
 # =====================
-def load_image(image_path, no_resize=False, no_crop=True):
-    img = Image.open(image_path).convert('RGB')
+def load_image(image_path: str,
+               no_resize: bool = False,
+               no_crop: bool = True) -> torch.Tensor:
+    img = Image.open(image_path).convert("RGB")
     return _preprocess_pil(img, no_resize=no_resize, no_crop=no_crop)
 
-def run_freqnet_detection(model_path, image_path, cuda=True):
+
+def run_freqnet_detection(model_path: str,
+                          image_path: str,
+                          cuda: bool = True) -> Tuple[int, List[float]]:
+    """
+    파일 경로 입력으로 분류 수행.
+    반환: (pred, [real_conf, fake_conf])
+    """
     model, device = get_model(model_path, cuda=cuda)
-    image = load_image(image_path).unsqueeze(0).to(device)
+    image = load_image(image_path).unsqueeze(0).to(device)  # [1,3,H,W]
+
     with torch.inference_mode():
-        out = model(image)
-        conf = torch.sigmoid(out).flatten().item()
-    pred = 1 if conf > 0.5 else 0
-    return pred, [1 - conf, conf]
+        out = model(image)                                  # [1,1] or [1,K]
+        if out.ndim == 2 and out.size(1) == 1:
+            conf_fake = torch.sigmoid(out).flatten().item()
+        else:
+            # 멀티클래스일 경우 softmax → fake 클래스가 1이라고 가정
+            probs = torch.softmax(out, dim=1)[0]
+            conf_fake = float(probs[1].item()) if probs.numel() > 1 else float(probs[0].item())
+
+    pred = 1 if conf_fake > 0.5 else 0
+    return pred, [1.0 - conf_fake, conf_fake]
+
 
 # =====================
 # 새 API(바이트/메모리 입력)
 # =====================
-def run_freqnet_detection_from_pil(model_path: str, img_pil: Image.Image, cuda=True,
-                                   no_resize=False, no_crop=True) -> Tuple[int, list]:
+def run_freqnet_detection_from_pil(model_path: str,
+                                   img_pil: Image.Image,
+                                   cuda: bool = True,
+                                   no_resize: bool = False,
+                                   no_crop: bool = True) -> Tuple[int, List[float]]:
     model, device = get_model(model_path, cuda=cuda)
     image = _preprocess_pil(img_pil, no_resize=no_resize, no_crop=no_crop).unsqueeze(0).to(device)
+
     with torch.inference_mode():
         out = model(image)
-        conf = torch.sigmoid(out).flatten().item()
-    pred = 1 if conf > 0.5 else 0
-    return pred, [1 - conf, conf]
+        if out.ndim == 2 and out.size(1) == 1:
+            conf_fake = torch.sigmoid(out).flatten().item()
+        else:
+            probs = torch.softmax(out, dim=1)[0]
+            conf_fake = float(probs[1].item()) if probs.numel() > 1 else float(probs[0].item())
 
-def run_freqnet_detection_from_bytes(model_path: str, img_bytes: bytes, cuda=True,
-                                     no_resize=False, no_crop=True) -> Tuple[int, list]:
+    pred = 1 if conf_fake > 0.5 else 0
+    return pred, [1.0 - conf_fake, conf_fake]
+
+
+def run_freqnet_detection_from_bytes(model_path: str,
+                                     img_bytes: bytes,
+                                     cuda: bool = True,
+                                     no_resize: bool = False,
+                                     no_crop: bool = True) -> Tuple[int, List[float]]:
     img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    return run_freqnet_detection_from_pil(model_path, img_pil, cuda=cuda,
-                                          no_resize=no_resize, no_crop=no_crop)
+    return run_freqnet_detection_from_pil(
+        model_path,
+        img_pil,
+        cuda=cuda,
+        no_resize=no_resize,
+        no_crop=no_crop,
+    )

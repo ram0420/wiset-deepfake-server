@@ -152,173 +152,250 @@
 #     # plt.axis('off')
 #     # plt.show()
 
+# app/detection_core/Freq_CAM.py
+# 경량 Grad-CAM 구현:
+# - 모델 싱글톤 재사용(매 호출 로드 금지) : inference.get_model()
+# - 타깃 conv 레이어 1회 탐색 후 캐시
+# - torchvision / opencv 미사용(PIL+NumPy로 전처리/오버레이)
+# - 입력 224 고정, Grad-CAM 계산 시에만 enable_grad
+# - 반환: PIL.Image(Image.Image) (필요 시 호출측에서 PNG 인코딩)
 
+from __future__ import annotations
+
+import io
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-import cv2
 from PIL import Image
-import torchvision.transforms as transforms
-from .freqnet import freqnet  # 상대 경로로 freqnet.py에서 import
+
+# ✅ 싱글톤 모델 재사용
+#   get_model() 시그니처는 프로젝트에 따라 다를 수 있으므로
+#   (model_path, cuda) / (model_path) / () 3가지 모두 시도.
+from .inference import get_model  # 상대경로 주의
+
+# ---- 전역 캐시: 마지막 Conv 레이어 ----
+_TARGET_LAYER: torch.nn.Module | None = None
+
+
+def _get_device_from_model(model: torch.nn.Module) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        # 파라미터가 없는 모듈일 일은 거의 없지만, 안전 장치
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _resolve_model_and_device(model_path: str) -> tuple[torch.nn.Module, torch.device]:
+    """
+    inference.get_model()의 다양한 시그니처에 대응해서
+    (model, device) 형태로 반환한다.
+    """
+    model = None
+    # 1) (model_path, cuda) 시그니처 시도
+    try:
+        model = get_model(model_path, cuda=torch.cuda.is_available())  # type: ignore[arg-type]
+    except TypeError:
+        pass
+    # 2) (model_path) 시그니처 시도
+    if model is None:
+        try:
+            model = get_model(model_path)  # type: ignore[call-arg]
+        except TypeError:
+            pass
+    # 3) 인자 없는 시그니처 시도
+    if model is None:
+        model = get_model()  # type: ignore[call-arg]
+
+    # get_model이 (model, device)를 반환할 수도 있으므로 처리
+    if isinstance(model, tuple) and len(model) == 2:
+        m, dev = model
+        return m.eval(), torch.device(dev)
+    else:
+        dev = _get_device_from_model(model)
+        return model.eval(), dev
+
+
+def _get_target_layer(model: torch.nn.Module) -> torch.nn.Module:
+    """
+    한 번만 찾아 전역에 캐시. 모델 구조가 바뀌지 않는다는 가정.
+    기본적으로 '마지막 Conv2d'를 사용.
+    """
+    global _TARGET_LAYER
+    if _TARGET_LAYER is not None:
+        return _TARGET_LAYER
+
+    # 프로젝트에 특화된 경로가 있다면 여기에 우선 시도 (예: model.layer2[3].conv3)
+    # try:
+    #     _TARGET_LAYER = model.layer2[3].conv3
+    #     return _TARGET_LAYER
+    # except Exception:
+    #     pass
+
+    # 폴백: 마지막 Conv2d를 뒤에서부터 찾아 사용
+    for m in reversed(list(model.modules())):
+        if isinstance(m, torch.nn.Conv2d):
+            _TARGET_LAYER = m
+            break
+    if _TARGET_LAYER is None:
+        raise RuntimeError("Could not find a convolutional layer for Grad-CAM.")
+    return _TARGET_LAYER
 
 
 class GradCAM:
     """
-    Simple Grad-CAM with full backward hook (no FutureWarning).
-    target_layer: a conv module (e.g., model.layer2[3].conv3)
+    경량 Grad-CAM 구현.
+    - target_layer에 forward/full-backward hook을 걸어 activation/gradient만 보관
+    - 모델 전체 파라미터 gradient는 필요 없음(활성맵에 대한 grad만 필요)
     """
     def __init__(self, model: torch.nn.Module, target_layer: torch.nn.Module):
         self.model = model
         self.target_layer = target_layer
-        self.gradients = None
-        self.activations = None
-        self._handle_f = target_layer.register_forward_hook(self._save_activation)
-        # Use full backward hook to avoid deprecation / missing grads
-        self._handle_b = target_layer.register_full_backward_hook(self._save_gradient)
+        self._act = None
+        self._grad = None
+        self._hf = target_layer.register_forward_hook(self._on_fwd)
+        self._hb = target_layer.register_full_backward_hook(self._on_bwd)
+
+    def _on_fwd(self, module, inputs, output):
+        # output: [N, C, H, W]
+        self._act = output
+
+    def _on_bwd(self, module, grad_input, grad_output):
+        # grad_output[0]: dScore/dActivation
+        self._grad = grad_output[0]
 
     def remove_hooks(self):
         try:
-            self._handle_f.remove()
+            self._hf.remove()
         except Exception:
             pass
         try:
-            self._handle_b.remove()
+            self._hb.remove()
         except Exception:
             pass
 
-    def _save_activation(self, module, input, output):
-        # shape: [N, C, H, W]
-        self.activations = output
-
-    def _save_gradient(self, module, grad_input, grad_output):
-        # grad_output[0] corresponds to dL/d(activation)
-        self.gradients = grad_output[0]
-
-    def __call__(self, x: torch.Tensor, class_idx: int | None = None) -> np.ndarray:
+    @torch.inference_mode(False)
+    def __call__(self, x: torch.Tensor, class_idx: int | None = None) -> torch.Tensor:
         """
-        x: normalized input tensor [N=1, C, H, W] with grad enabled on the graph
-        returns: CAM mask as np.float32 in [0,1] with size of input spatial dims
+        x: [1, 3, H, W] (requires_grad=True 권장; 최소한 target_layer 활성맵에 grad 필요)
+        return: CAM tensor [H, W] (float32, 0..1)
         """
-        # Forward
-        output = self.model(x)  # shape [1, K] or [1,1]
+        logits = self.model(x)  # [1, K] 또는 [1,1]
         if class_idx is None:
-            # If binary (1 logit), default to index 0
-            if output.shape[1] == 1:
-                class_idx = 0
+            if logits.ndim == 2 and logits.size(1) > 1:
+                class_idx = int(torch.argmax(logits, dim=1).item())
             else:
-                class_idx = int(output.argmax(dim=1).item())
+                class_idx = 0
 
-        # Score selection
-        score = output[:, class_idx]
+        score = logits[0, class_idx] if logits.ndim == 2 else logits[0, 0]
 
-        # Backward
+        # 역전파는 활성맵에 대한 grad만 필요
         self.model.zero_grad(set_to_none=True)
-        score.backward(retain_graph=True)
+        score.backward()  # dScore/dActivation → self._grad 채워짐
 
-        # Compute weights: global-average-pooling on gradients
-        # gradients: [1, C, H, W] -> mean over H,W -> [1, C, 1, 1]
-        weights = self.gradients.mean(dim=(2, 3), keepdim=True)
+        A = self._act                          # [1, C, H', W']
+        dA = self._grad                        # [1, C, H', W']
+        if A is None or dA is None:
+            raise RuntimeError("GradCAM hooks did not capture activation/gradient.")
 
-        # CAM: weighted sum of activations
-        cam = (weights * self.activations).sum(dim=1, keepdim=True)  # [1,1,H,W]
-        cam = F.relu(cam)  # keep positive influences
-        cam = cam.squeeze().detach().cpu().float().numpy()  # [H, W]
+        # 채널 가중치: grad의 spatial 평균
+        w = dA.mean(dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
+        cam = torch.relu((w * A).sum(dim=1, keepdim=True))  # [1,1,H',W']
 
-        # Normalize to [0,1] safely
-        cam_min, cam_max = cam.min(), cam.max()
-        if cam_max > cam_min:
-            cam = (cam - cam_min) / (cam_max - cam_min)
-        else:
-            cam = np.zeros_like(cam, dtype=np.float32)
-
-        # Resize to match input spatial size
-        H, W = x.shape[-2], x.shape[-1]
-        cam = cv2.resize(cam, (W, H), interpolation=cv2.INTER_LINEAR)
-        return cam
+        # 0..1 정규화
+        cam = cam.squeeze(0).squeeze(0)        # [H', W']
+        cam = cam - cam.min()
+        denom = cam.max().clamp_min(1e-6)
+        cam = cam / denom
+        return cam  # [H', W'], float32
 
 
-def _overlay_heatmap_on_image(img01: np.ndarray, mask01: np.ndarray,
-                              use_rgb: bool = True,
-                              colormap: int = cv2.COLORMAP_JET,
-                              image_weight: float = 0.5) -> np.ndarray:
+# ---- 전처리: torchvision 없이 PIL+NumPy로 구현 ----
+_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def _preprocess_for_model(pil: Image.Image, size: int = 224) -> torch.Tensor:
     """
-    img01: float32 in [0,1], shape [H,W,3]
-    mask01: float32 in [0,1], shape [H,W]
-    return: uint8 RGB image
+    PIL → [1,3,H,W] float32, ImageNet 정규화
     """
-    heatmap = cv2.applyColorMap(np.uint8(255 * mask01), colormap)
-    if use_rgb:
-        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-    heatmap = heatmap.astype(np.float32) / 255.0
-
-    img01 = np.clip(img01.astype(np.float32), 0.0, 1.0)
-    alpha = float(np.clip(image_weight, 0.0, 1.0))
-
-    blended = (1.0 - alpha) * heatmap + alpha * img01
-    m = blended.max()
-    if m > 0:
-        blended /= m
-    return np.uint8(255 * blended)
+    img = pil.convert("RGB").resize((size, size), Image.BILINEAR)
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    arr = (arr - _MEAN) / _STD  # [H,W,3]
+    t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)  # [1,3,H,W]
+    return t
 
 
-def Freq_CAM_init(image_save_path: str, model_path: str, target_class: int | None = 0) -> np.ndarray:
+def _preprocess_for_vis(pil: Image.Image, size: int = 224) -> np.ndarray:
     """
-    Load the model and input image, apply Grad-CAM, and return heatmap image (RGB uint8 ndarray).
-    - Uses full backward hook (no deprecation warning)
-    - Uses normalized input for model, and unnormalized for visualization overlay
+    PIL → 시각화용 [H,W,3] float32(0..1)
     """
-    # ---- Device & model ----
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = freqnet(num_classes=1).to(device).eval()
+    img = pil.convert("RGB").resize((size, size), Image.BILINEAR)
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    return arr  # [H,W,3], 0..1
 
-    # Load weights
-    ckpt = torch.load(model_path, map_location=device)
-    state = ckpt["model"] if isinstance(ckpt, dict) and "model" in ckpt else ckpt
-    model.load_state_dict(state, strict=False)
 
-    # ---- Pick target layer (fallback-safe) ----
-    # Default path from your code; if it fails, try to find the last conv
-    try:
-        target_layer = model.layer2[3].conv3
-    except Exception:
-        # Fallback: best-effort to get a last conv-like module
-        target_layer = None
-        for m in reversed(list(model.modules())):
-            if isinstance(m, torch.nn.Conv2d):
-                target_layer = m
-                break
-        if target_layer is None:
-            raise RuntimeError("Could not find a convolutional layer for Grad-CAM.")
+# ---- OpenCV 없이 PIL로 히트맵 오버레이 ----
+def _overlay_pil(base_rgb01: np.ndarray, mask01: torch.Tensor, alpha: float = 0.5) -> Image.Image:
+    """
+    base_rgb01: [H,W,3] float32(0..1)
+    mask01:     [h,w]   torch.float32(0..1) (CAM, 필요 시 내부에서 resize)
+    return: PIL.Image (RGBA 합성 후 RGB로 반환)
+    """
+    H, W, _ = base_rgb01.shape
 
-    gradcam = GradCAM(model, target_layer)
+    # CAM을 입력 크기에 맞게 resize (bilinear)
+    if mask01.shape[0] != H or mask01.shape[1] != W:
+        cam = F.interpolate(mask01.unsqueeze(0).unsqueeze(0), size=(H, W), mode="bilinear", align_corners=False)
+        cam = cam.squeeze(0).squeeze(0).contiguous()
+    else:
+        cam = mask01.contiguous()
 
-    # ---- Preprocess (two branches) ----
-    # For model input (normalized like inference.py):
-    tf_model = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std=[0.229, 0.224, 0.225]),
-    ])
-    # For visualization overlay (0..1 range):
-    tf_vis = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),  # 0..1
-    ])
+    cam_u8 = (cam.clamp(0, 1).mul_(255).byte().cpu().numpy())  # [H,W] uint8
+    heat = Image.fromarray(cam_u8, mode="L")                   # 그레이 알파
 
+    base = Image.fromarray(np.clip(base_rgb01 * 255.0, 0, 255).astype(np.uint8), mode="RGB").convert("RGBA")
+    red = Image.new("RGBA", (W, H), (255, 0, 0, 0))
+    red.putalpha(heat)  # 알파=CAM 강도
+
+    out = Image.alpha_composite(base, red)  # 빨간 히트맵 오버레이
+
+    # 전체 투명도 조절(원한다면)
+    if alpha != 1.0:
+        a = out.split()[-1].point(lambda p: int(p * alpha))
+        out.putalpha(a)
+
+    return out.convert("RGB")
+
+
+# ==== 공개 API ===============================================================
+
+def Freq_CAM_init(image_save_path: str, model_path: str, target_class: int | None = 0) -> Image.Image:
+    """
+    파일 경로의 이미지를 읽어 Grad-CAM 오버레이 결과(PIL.Image) 반환.
+    - 모델은 싱글톤 재사용(메모리 절약)
+    - CAM 타깃 레이어는 1회 탐색 후 캐시
+    - 입력/시각화는 224x224 고정(경량)
+    """
+    # 1) 모델 & 디바이스
+    model, device = _resolve_model_and_device(model_path)
+    model.eval()  # 안전 차원
+
+    # 2) 이미지 로딩/전처리
     pil = Image.open(image_save_path).convert("RGB")
-    x_model = tf_model(pil).unsqueeze(0).to(device)
-    x_model.requires_grad_(True)  # need gradients for CAM
-    x_vis = tf_vis(pil).permute(1, 2, 0).cpu().numpy().astype(np.float32)  # [H,W,3] in 0..1
+    x_model = _preprocess_for_model(pil, size=224).to(device)    # [1,3,224,224]
+    x_vis01 = _preprocess_for_vis(pil, size=224)                 # [224,224,3] 0..1
 
-    # ---- Compute CAM ----
-    with torch.enable_grad():  # ensure grads are enabled here
-        cam = gradcam(x_model, class_idx=target_class)
+    # 3) Grad-CAM 실행 (해당 블록에서만 grad 허용)
+    target_layer = _get_target_layer(model)
+    cammer = GradCAM(model, target_layer)
+    try:
+        # 활성맵에 대한 gradient가 흐르도록 입력에 grad 허용
+        x_model.requires_grad_(True)
+        with torch.enable_grad():
+            cam01 = cammer(x_model, class_idx=target_class)  # [h,w] float32 0..1 (h,w≈7..14)
+    finally:
+        cammer.remove_hooks()
 
-    gradcam.remove_hooks()
-
-    # ---- Overlay & return ----
-    cam_rgb = _overlay_heatmap_on_image(x_vis, cam, use_rgb=True,
-                                        colormap=cv2.COLORMAP_JET,
-                                        image_weight=0.5)
-    return cam_rgb
+    # 4) 오버레이(메모리 절약: PIL 합성)
+    out_img = _overlay_pil(x_vis01, cam01, alpha=0.5)  # PIL.Image
+    return out_img
