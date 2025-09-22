@@ -2,9 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.schemas.auth import (
     RegisterRequest, RegisterResponse,
-    LoginRequest, LoginResponse,
-    FindUsernameRequest, FindUsernameResponse,
-    PasswordFindRequest, PasswordFindResponse
+    LoginRequest, LoginResponse
 )
 from app.models import User
 from app.dependencies import get_db

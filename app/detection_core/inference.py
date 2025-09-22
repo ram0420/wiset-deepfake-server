@@ -88,19 +88,8 @@
 #     print(f"Prediction: {'Fake' if prediction == 1 else 'Real'}")
 #     print(f"Confidence: Real = {result[0]:.4f}, Fake = {result[1]:.4f}")
 
-
-import io
-import threading
-from typing import Tuple
-import torch
-from PIL import Image
-import torchvision.transforms as transforms
-from .freqnet import freqnet
-
-
-# =====================
-# 전역 싱글톤 모델 로딩
-# =====================# app/detection_core/inference.py
+# app/detection_core/inference.py
+from __future__ import annotations
 
 import io
 import threading
@@ -116,7 +105,6 @@ from .freqnet import freqnet
 # =====================
 # 전역 싱글톤 모델 로딩
 #  - model_path/디바이스가 바뀌면 자동 재로딩
-#  - 파라미터는 requires_grad=False로 고정(추론 전용)
 # =====================
 _MODEL: Optional[torch.nn.Module] = None
 _DEVICE: Optional[torch.device] = None
@@ -128,7 +116,7 @@ def _safe_extract_state(ckpt):
     """다양한 체크포인트 포맷을 안전하게 처리."""
     if isinstance(ckpt, dict):
         for key in ("model", "state_dict", "weights"):
-            if key in ckpt and isinstance(ckpt[key], (dict, torch.nn.Module)):
+            if key in ckpt:
                 return ckpt[key]
     return ckpt
 
@@ -143,14 +131,17 @@ def _load_model(model_path: str, device: torch.device) -> torch.nn.Module:
         ckpt = torch.load(model_path, map_location="cpu")
 
     state = _safe_extract_state(ckpt)
-    model.load_state_dict(state, strict=False)
+    if isinstance(state, dict):
+        model.load_state_dict(state, strict=False)
+    else:
+        # 이례적으로 nn.Module 형태가 오면 그대로 복사(거의 없음)
+        model.load_state_dict(state.state_dict(), strict=False)
 
-    # 추론 전용 설정
+    # 추론 전용 설정(파라미터 grad off) — Grad-CAM엔 영향 없음
     for p in model.parameters():
         p.requires_grad_(False)
 
     model.to(device).eval()
-    torch.set_grad_enabled(False)
     return model
 
 
@@ -161,7 +152,6 @@ def get_model(model_path: str, cuda: bool = True) -> Tuple[torch.nn.Module, torc
     """
     global _MODEL, _DEVICE, _MODEL_PATH
     want_device = torch.device("cuda" if cuda and torch.cuda.is_available() else "cpu")
-
     with _LOCK:
         if _MODEL is None or _DEVICE != want_device or _MODEL_PATH != model_path:
             _MODEL = _load_model(model_path, want_device)
@@ -224,7 +214,6 @@ def run_freqnet_detection(model_path: str,
         if out.ndim == 2 and out.size(1) == 1:
             conf_fake = torch.sigmoid(out).flatten().item()
         else:
-            # 멀티클래스일 경우 softmax → fake 클래스가 1이라고 가정
             probs = torch.softmax(out, dim=1)[0]
             conf_fake = float(probs[1].item()) if probs.numel() > 1 else float(probs[0].item())
 
