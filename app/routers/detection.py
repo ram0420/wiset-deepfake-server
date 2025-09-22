@@ -281,18 +281,24 @@ from app.services import detection_service
 import io
 import os
 import re
+import gc
 import time
 import tempfile
 from threading import Lock
 from typing import Dict, Any, Optional, Tuple
 
-# ===== 저메모리 환경 권장 설정 (Render Free) =====
+# ===== 저메모리 환경 권장 설정 (Render Free 등) =====
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import torch
 import numpy as np
 from PIL import Image
+
+# 너무 큰 이미지 폭주 방지(압축폭탄 등)
+Image.MAX_IMAGE_PIXELS = 20_000_000
 
 from app.detection_core.inference import run_freqnet_detection
 from app.detection_core.Freq_CAM import Freq_CAM_init
@@ -300,10 +306,12 @@ from app.detection_core.Freq_CAM import Freq_CAM_init
 router = APIRouter(prefix="/detections", tags=["detection"])
 
 # ===== 설정 =====
-MODEL_PATH = "./app/detection_core/0904_10epoch.pth"
+# 환경변수로 대체 가능: MODEL_PATH=/app/app/detection_core/xxx.pth
+MODEL_PATH = os.getenv("MODEL_PATH", "./app/detection_core/0904_10epoch.pth")
 
 # 메모리/성능 튜닝(환경변수로 조정 가능)
-DISABLE_CAM = os.getenv("DISABLE_CAM", "1") == "1"   # 기본: CAM 사전생성 끔(온디맨드)
+# DISABLE_CAM: 사전 생성 여부만 제어 (온디맨드 생성은 항상 가능)
+DISABLE_CAM = os.getenv("DISABLE_CAM", "1") == "1"   # 기본: CAM 사전생성 끔
 MAX_IMG_DIM = int(os.getenv("MAX_IMG_DIM", "384"))   # 추론 입력 리사이즈 상한(px)
 CAM_MAX_DIM = int(os.getenv("CAM_MAX_DIM", "256"))   # CAM 계산 전용 더 작은 상한(px)
 try:
@@ -311,11 +319,25 @@ try:
 except Exception:
     pass
 
-# ===== 메모리 내 임시 이미지 저장소 (TTL) =====
+# ===== 메모리 내 임시 이미지 저장소 (TTL 캐시) =====
 # 구조: { token: {"orig": bytes, "gradcam": bytes|None, "exp": epoch_seconds} }
 _IMAGE_STORE: Dict[str, Dict[str, Any]] = {}
 _IMAGE_STORE_LOCK = Lock()
-IMAGE_TTL_SECONDS = 10 * 60  # 10분 (필요시 조정)
+IMAGE_TTL_SECONDS = 10 * 60  # 10분
+
+# 토큰별 CAM 생성 동시성 제어(메모리 피크 방지)
+_CAM_LOCKS: Dict[str, Lock] = {}
+_CAM_LOCKS_GUARD = Lock()
+
+
+def _get_cam_lock(token: str) -> Lock:
+    with _CAM_LOCKS_GUARD:
+        lock = _CAM_LOCKS.get(token)
+        if lock is None:
+            lock = Lock()
+            _CAM_LOCKS[token] = lock
+        return lock
+
 
 def _purge_expired_tokens() -> None:
     now = time.time()
@@ -323,6 +345,7 @@ def _purge_expired_tokens() -> None:
         expired = [k for k, v in _IMAGE_STORE.items() if v.get("exp", 0) < now]
         for k in expired:
             _IMAGE_STORE.pop(k, None)
+
 
 def _put_images_to_store(orig_png: bytes, cam_png: Optional[bytes]) -> str:
     from uuid import uuid4
@@ -335,13 +358,15 @@ def _put_images_to_store(orig_png: bytes, cam_png: Optional[bytes]) -> str:
         }
     return token
 
+
 def _update_cam_in_store(token: str, cam_bytes: bytes) -> None:
     with _IMAGE_STORE_LOCK:
         entry = _IMAGE_STORE.get(token)
         if not entry:
             return
         entry["gradcam"] = cam_bytes
-        entry["exp"] = time.time() + IMAGE_TTL_SECONDS  # (선택) 조회 시 TTL 연장
+        entry["exp"] = time.time() + IMAGE_TTL_SECONDS  # 조회 시 TTL 연장
+
 
 def _get_image_from_store(token: str, kind: str) -> Optional[bytes]:
     _purge_expired_tokens()
@@ -357,6 +382,7 @@ def _get_image_from_store(token: str, kind: str) -> Optional[bytes]:
             return entry.get("gradcam")
         return None
 
+
 # ===== 유틸: 리사이즈 & 직렬화 =====
 def _downscale_pil(img: Image.Image, max_side: int) -> Image.Image:
     w, h = img.size
@@ -366,12 +392,15 @@ def _downscale_pil(img: Image.Image, max_side: int) -> Image.Image:
     scale = max_side / float(m)
     new_w = max(1, int(w * scale))
     new_h = max(1, int(h * scale))
+    # LANCZOS가 품질은 좋으나 메모리 부담이 조금 있음 → 이 정도 크기에선 OK
     return img.resize((new_w, new_h), Image.LANCZOS)
+
 
 def _pil_to_png_bytes(img_pil: Image.Image) -> bytes:
     buf = io.BytesIO()
     img_pil.save(buf, format="PNG", optimize=True)
     return buf.getvalue()
+
 
 # ===== CAM 온디맨드 생성 (요청 시에만 메모리 사용) =====
 def _generate_cam_on_demand(token: str) -> Optional[bytes]:
@@ -379,7 +408,7 @@ def _generate_cam_on_demand(token: str) -> Optional[bytes]:
     orig가 캐시에 있을 때만 임시파일 경유로 Grad-CAM 생성 → 캐시에 저장 후 반환.
     DISABLE_CAM=1 이어도 /image?kind=gradcam 요청 시 호출되어 생성한다.
     - CAM 계산은 CAM_MAX_DIM으로 더 작게 수행
-    - UI 정합성을 위해 최종 이미지는 orig와 동일 크기로 리사이즈
+    - 최종 이미지는 orig와 동일 크기로 리사이즈
     """
     orig_bytes = _get_image_from_store(token, "orig")
     if not orig_bytes:
@@ -422,16 +451,20 @@ def _generate_cam_on_demand(token: str) -> Optional[bytes]:
                 os.remove(tmp_path)
             except Exception:
                 pass
+        # 사용 끝난 큰 객체 정리
+        del orig_pil, cam_in
+        gc.collect()
+
 
 # ===== 코어: 디스크 영구 저장 없이 추론 수행 =====
 async def _predict_deepfake_freqnet_no_persist(upload_file: UploadFile) -> Tuple[float, bool, bytes, Optional[bytes]]:
     """
     - 업로드 이미지를 메모리에서 PNG 정규화(+다운스케일: MAX_IMG_DIM)
     - Windows 호환 임시파일 경유로 모델 추론
-    - (옵션) Grad-CAM 사전 생성(DISABLE_CAM=0일 때만; CAM_MAX_DIM으로 줄여 계산)
+    - (옵션) Grad-CAM 사전 생성(DISABLE_CAM=0일 때만; CAM_MAX_DIM으로 축소 계산)
     - 원본/Grad-CAM PNG 바이트 반환
     """
-    # 업로드 읽기
+    # 업로드 읽기 (주의: 가능한 한 빨리 PIL 파싱 후 다운스케일하여 메모리 절약)
     raw = await upload_file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="빈 파일입니다.")
@@ -441,9 +474,14 @@ async def _predict_deepfake_freqnet_no_persist(upload_file: UploadFile) -> Tuple
         orig_img = Image.open(io.BytesIO(raw)).convert("RGB")
     except Exception:
         raise HTTPException(status_code=415, detail="유효한 이미지 파일이 아닙니다.")
+    finally:
+        # 원시 바이트는 더 이상 사용하지 않음 → GC 힌트
+        del raw
+        gc.collect()
+
     orig_img = _downscale_pil(orig_img, MAX_IMG_DIM)
 
-    # 메모리에서 PNG 바이트로 정규화
+    # 메모리에서 PNG 바이트로 정규화 (서버 저장 없이)
     orig_png = _pil_to_png_bytes(orig_img)
 
     tmp_path = None
@@ -481,6 +519,9 @@ async def _predict_deepfake_freqnet_no_persist(upload_file: UploadFile) -> Tuple
 
             cam_png = _pil_to_png_bytes(cam_img)
 
+        # 사용 끝난 객체 정리
+        del orig_img
+        gc.collect()
         return fake_confidence, is_fake, orig_png, cam_png
 
     finally:
@@ -490,6 +531,8 @@ async def _predict_deepfake_freqnet_no_persist(upload_file: UploadFile) -> Tuple
                 os.remove(tmp_path)
             except Exception:
                 pass
+        gc.collect()
+
 
 # ===== 라우팅 =====
 
@@ -501,6 +544,7 @@ def create_detection_session_endpoint(
     """새로운 탐지 세션 생성"""
     session = detection_service.create_detection_session(db=db, user_id=user.id)
     return {"detectionId": session.id}
+
 
 @router.post("/{detectionId}/run", response_model=DetectionRunResponse, status_code=202)
 async def run_detection(
@@ -561,6 +605,7 @@ async def run_detection(
         estimatedTime=0
     )
 
+
 @router.get("/result/{detectionId}", response_model=DetectionResultResponse)
 def get_detection_result(
     detectionId: str,
@@ -601,26 +646,34 @@ def get_detection_result(
         )
     )
 
+
 @router.get("/image")
 def get_image(kind: str, t: str):
     """
     메모리에 있는 PNG 이미지를 스트리밍 반환.
     - kind=gradcam인데 캐시에 없으면 그때 즉시 생성(온디맨드)
     - 디스크 고정 저장 없음
+    - 토큰별 락으로 동시 생성 방지(메모리 피크 방지)
     """
     if kind not in ("orig", "gradcam"):
         raise HTTPException(status_code=400, detail="kind must be 'orig' or 'gradcam'")
 
     data = _get_image_from_store(t, kind)
 
-    # 🔽 온디맨드 CAM 생성: 필요할 때만 만든다
+    # 🔽 온디맨드 CAM 생성: 필요할 때만 만든다 (토큰별 동시성 1개 보장)
     if kind in ("gradcam", "cam") and not data:
-        data = _generate_cam_on_demand(t)
+        lock = _get_cam_lock(t)
+        with lock:
+            # 생성 사이에 다른 스레드가 만들어놨을 수 있으니 재확인
+            data = _get_image_from_store(t, kind)
+            if not data:
+                data = _generate_cam_on_demand(t)
 
     if not data:
         # TTL 만료/토큰 없음 → 404
         raise HTTPException(status_code=404, detail="이미지가 만료되었거나 토큰이 유효하지 않습니다.")
 
+    # 메모리 복제 최소화를 위해 StreamingResponse 사용
     return StreamingResponse(
         io.BytesIO(data),
         media_type="image/png",
